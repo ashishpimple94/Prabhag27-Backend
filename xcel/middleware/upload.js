@@ -42,15 +42,29 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-const maxMb = parseInt(process.env.MAX_FILE_SIZE_MB || '25');
+// Vercel has a 4.5MB request body limit, so we need to restrict file size
+// For Vercel: max 4MB (safety margin), For Render: 25MB default
+const getMaxFileSize = () => {
+  if (isVercel) {
+    // Vercel serverless function payload limit is 4.5MB
+    // Set to 4MB to leave room for request overhead
+    return 4 * 1024 * 1024; // 4MB
+  }
+  const maxMb = parseInt(process.env.MAX_FILE_SIZE_MB || '25');
+  return maxMb * 1024 * 1024;
+};
+
+const maxFileSize = getMaxFileSize();
+const maxMb = Math.round(maxFileSize / (1024 * 1024));
+
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: maxMb * 1024 * 1024 // default 25MB (configurable via MAX_FILE_SIZE_MB)
+    fileSize: maxFileSize
   }
 });
 
-// Export storage type for controller to know how to handle files
-export { isVercel, isRender };
+// Export max file size and storage type for controller
+export { maxMb, isVercel, isRender };
 export default upload;
