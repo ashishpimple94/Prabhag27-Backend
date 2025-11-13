@@ -874,52 +874,177 @@ export const uploadExcelFile = async (req, res) => {
 
 // Update other functions with Hindi messages
 export const getAllVoters = async (req, res) => {
+  const startTime = Date.now();
+  
   try {
+    // Check database connection first
+    const mongoose = await import('mongoose');
+    if (mongoose.default.connection.readyState !== 1) {
+      console.warn('⚠️ Database not connected, attempting reconnection...');
+      // Connection will be handled by middleware, but log warning
+    }
+
     // Optimized pagination with reasonable limits for large datasets
     const page = Math.max(1, parseInt(req.query.page) || 1);
-    const maxLimit = 1000; // Maximum records per page (prevents memory issues)
-    const defaultLimit = 100; // Default records per page
-    const limit = Math.min(maxLimit, Math.max(1, parseInt(req.query.limit) || defaultLimit));
-    const skip = (page - 1) * limit;
+    const maxLimit = 50000; // Maximum records per page (increased for large datasets)
+    const defaultLimit = 1000; // Default records per page (increased from 100)
+    
+    // Support for fetching all records: ?limit=all or ?limit=0
+    const limitParam = req.query.limit;
+    let limit;
+    let fetchAll = false;
+    
+    if (limitParam === 'all' || limitParam === '0' || limitParam === 'ALL') {
+      fetchAll = true;
+      limit = null; // No limit - fetch all records
+    } else {
+      limit = Math.min(maxLimit, Math.max(1, parseInt(limitParam) || defaultLimit));
+    }
+    
+    const skip = fetchAll ? 0 : (page - 1) * limit;
 
-    // Use lean() for better performance with large datasets (returns plain JS objects)
-    const voters = await VoterData.find({})
-      .skip(skip)
-      .limit(limit)
+    console.log(`📊 Fetching voters - Page: ${page}, Limit: ${fetchAll ? 'ALL' : limit}, Skip: ${skip}`);
+
+    // Build query with optimizations
+    let query = VoterData.find({})
       .sort({ createdAt: -1 })
-      .lean() // Use lean() for better performance
-      .select('-__v'); // Exclude version key
+      .lean() // Use lean() for better performance (returns plain JS objects, not Mongoose documents)
+      .select('-__v') // Exclude version key
+      .maxTimeMS(30000); // 30 second timeout for query
+    
+    // Apply skip and limit only if not fetching all
+    if (!fetchAll) {
+      query = query.skip(skip).limit(limit);
+    } else {
+      // For fetching all, still set a reasonable timeout
+      query = query.maxTimeMS(60000); // 60 seconds for all records
+    }
 
-    // Use estimatedDocumentCount for better performance on large collections
-    const totalCount = await VoterData.estimatedDocumentCount();
+    // Execute query with error handling and retry logic
+    let voters;
+    let queryError = null;
+    const maxRetries = 3;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`🔄 Query attempt ${attempt}/${maxRetries}...`);
+        voters = await query;
+        queryError = null;
+        break; // Success, exit retry loop
+      } catch (error) {
+        queryError = error;
+        console.error(`❌ Query attempt ${attempt} failed:`, error.message);
+        
+        // Check if it's a connection error
+        if (error.name === 'MongoNetworkError' || error.message.includes('connection')) {
+          if (attempt < maxRetries) {
+            console.log(`⏳ Retrying in ${attempt * 1000}ms...`);
+            await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+            continue;
+          }
+        } else {
+          // Non-connection error, don't retry
+          break;
+        }
+      }
+    }
+    
+    // If query failed after retries
+    if (queryError) {
+      throw queryError;
+    }
+
+    console.log(`✅ Fetched ${voters.length} records in ${((Date.now() - startTime) / 1000).toFixed(2)}s`);
+
+    // Get total count - use estimatedDocumentCount for better performance on large collections
+    let totalCount;
+    try {
+      totalCount = await VoterData.estimatedDocumentCount();
+    } catch (countError) {
+      console.warn('⚠️ estimatedDocumentCount failed, using countDocuments:', countError.message);
+      // Fallback to countDocuments if estimatedDocumentCount fails
+      totalCount = await VoterData.countDocuments({});
+    }
 
     // Set cache headers for load balancing
     res.set({
       'Cache-Control': 'public, max-age=60', // Cache for 60 seconds
       'X-Total-Count': totalCount,
-      'X-Page': page,
-      'X-Per-Page': limit,
-      'X-Total-Pages': Math.ceil(totalCount / limit)
+      'X-Page': fetchAll ? 1 : page,
+      'X-Per-Page': fetchAll ? totalCount : limit,
+      'X-Total-Pages': fetchAll ? 1 : Math.ceil(totalCount / limit),
+      'X-Query-Time': `${((Date.now() - startTime) / 1000).toFixed(2)}s`
     });
 
-    res.status(200).json({
+    // Prepare response
+    const response = {
       success: true,
       count: voters.length,
       totalCount: totalCount,
-      currentPage: page,
-      totalPages: Math.ceil(totalCount / limit),
-      perPage: limit,
-      hasNextPage: page < Math.ceil(totalCount / limit),
-      hasPrevPage: page > 1,
+      currentPage: fetchAll ? 1 : page,
+      totalPages: fetchAll ? 1 : Math.ceil(totalCount / limit),
+      perPage: fetchAll ? totalCount : limit,
+      hasNextPage: fetchAll ? false : page < Math.ceil(totalCount / limit),
+      hasPrevPage: fetchAll ? false : page > 1,
       data: voters,
-    });
+      message: fetchAll 
+        ? `All ${totalCount} records fetched successfully`
+        : `Fetched ${voters.length} of ${totalCount} records`,
+      message_mr: fetchAll
+        ? `सभी ${totalCount} रिकॉर्ड सफलतापूर्वक लाए गए`
+        : `${totalCount} में से ${voters.length} रिकॉर्ड लाए गए`,
+      queryTime: `${((Date.now() - startTime) / 1000).toFixed(2)}s`
+    };
+
+    // Log performance metrics
+    const queryTime = (Date.now() - startTime) / 1000;
+    console.log(`📈 Performance: ${voters.length} records in ${queryTime.toFixed(2)}s (${(voters.length / queryTime).toFixed(0)} records/sec)`);
+
+    res.status(200).json(response);
+
   } catch (error) {
-    console.error('Get voters error:', error);
-    res.status(500).json({
+    const errorTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.error('❌ Get voters error:', error);
+    console.error('Error details:', {
+      name: error.name,
+      message: error.message,
+      code: error.code,
+      time: `${errorTime}s`
+    });
+    
+    // Provide detailed error messages
+    let errorMessage = 'Server error';
+    let errorMessageMr = 'सर्वर एरर';
+    let statusCode = 500;
+    
+    if (error.name === 'MongoNetworkError' || error.message.includes('connection')) {
+      errorMessage = 'Database connection error. Please try again.';
+      errorMessageMr = 'डेटाबेस कनेक्शन त्रुटि। कृपया पुनः प्रयास करें।';
+      statusCode = 503;
+    } else if (error.name === 'MongoTimeoutError' || error.message.includes('timeout')) {
+      errorMessage = 'Query timeout. Try using pagination with smaller limit.';
+      errorMessageMr = 'क्वेरी टाइमआउट। छोटी सीमा के साथ पेजिनेशन का उपयोग करें।';
+      statusCode = 504;
+    } else if (error.message.includes('buffering timed out')) {
+      errorMessage = 'Database operation timed out. Please try again with pagination.';
+      errorMessageMr = 'डेटाबेस ऑपरेशन टाइमआउट। कृपया पेजिनेशन के साथ पुनः प्रयास करें।';
+      statusCode = 504;
+    }
+    
+    // Check if it was a fetch all request
+    const limitParam = req.query.limit;
+    const wasFetchAll = limitParam === 'all' || limitParam === '0' || limitParam === 'ALL';
+    
+    res.status(statusCode).json({
       success: false,
-      message: 'Server error',
-      message_mr: 'सर्वर एरर',
-      error: error.message,
+      message: errorMessage,
+      message_mr: errorMessageMr,
+      error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
+      errorType: error.name || 'UnknownError',
+      queryTime: `${errorTime}s`,
+      hint: wasFetchAll 
+        ? 'Try using pagination: ?page=1&limit=1000'
+        : 'If the error persists, try reducing the limit parameter'
     });
   }
 };
