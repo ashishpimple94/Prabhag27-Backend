@@ -79,6 +79,151 @@ const getVal = (row, candidates = []) => {
   return '';
 };
 
+
+const wantsHtmlResponse = (req = {}) => {
+  const headerType = (req.headers?.accept || '').toLowerCase();
+  const explicitType = (req.query?.responseType || req.body?.responseType || req.headers?.['x-response-type'] || '').toString().toLowerCase();
+  if (explicitType === 'html') return true;
+  return headerType.includes('text/html');
+};
+
+const escapeHtml = (value = '') => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+const stringifyBlock = (value) => escapeHtml(
+  typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+);
+
+const renderUploadHtml = (payload = {}) => {
+  const {
+    success = false,
+    message = '',
+    message_mr = '',
+    count,
+    totalProcessed,
+    errors,
+    error,
+    errorDetails,
+    fieldsInfo,
+    sample
+  } = payload;
+
+  const statusClass = success ? 'success' : 'error';
+  const summaryItems = [];
+  if (count !== undefined) summaryItems.push(`<li><strong>Inserted:</strong> ${count}</li>`);
+  if (totalProcessed !== undefined) summaryItems.push(`<li><strong>Total processed:</strong> ${totalProcessed}</li>`);
+  if (errors !== undefined) summaryItems.push(`<li><strong>Errors:</strong> ${errors}</li>`);
+
+  let detailSections = '';
+  if (error || message_mr) {
+    detailSections += `<p>${escapeHtml(message_mr || '')}</p>`;
+  }
+  if (errorDetails?.length) {
+    detailSections += `<h3>Error Details</h3><pre>${stringifyBlock(errorDetails)}</pre>`;
+  } else if (typeof error === 'string') {
+    detailSections += `<pre>${escapeHtml(error)}</pre>`;
+  }
+  if (sample) {
+    detailSections += `<h3>Sample Saved Rows</h3><pre>${stringifyBlock(sample)}</pre>`;
+  }
+  if (fieldsInfo) {
+    detailSections += `<h3>Detected Fields</h3><pre>${stringifyBlock(fieldsInfo)}</pre>`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Excel Upload Status</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 2rem;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .card {
+      width: 100%;
+      max-width: 860px;
+      background: #1e293b;
+      padding: 2rem;
+      border-radius: 1rem;
+      box-shadow: 0 20px 60px rgba(15, 23, 42, 0.5);
+      border: 1px solid rgba(226, 232, 240, 0.08);
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.75rem;
+      color: #f8fafc;
+    }
+    .status {
+      padding: 1.25rem;
+      border-radius: 0.75rem;
+      border: 1px solid rgba(226, 232, 240, 0.08);
+      background: rgba(15, 23, 42, 0.5);
+    }
+    .status.success {
+      border-color: rgba(34, 197, 94, 0.5);
+      color: #4ade80;
+    }
+    .status.error {
+      border-color: rgba(248, 113, 113, 0.5);
+      color: #f87171;
+    }
+    ul {
+      padding-left: 1.25rem;
+    }
+    a.button {
+      display: inline-block;
+      margin-top: 1.5rem;
+      background: #6366f1;
+      color: #fff;
+      padding: 0.85rem 1.5rem;
+      border-radius: 0.75rem;
+      text-decoration: none;
+    }
+    pre {
+      background: rgba(15, 23, 42, 0.6);
+      padding: 1rem;
+      border-radius: 0.75rem;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <section class="card">
+    <h1>Excel Upload</h1>
+    <div class="status ${statusClass}">
+      <strong>${escapeHtml(message)}</strong>
+      ${summaryItems.length ? `<ul>${summaryItems.join('')}</ul>` : ''}
+    </div>
+    ${detailSections}
+    <a class="button" href="/admin/upload">Upload another file</a>
+  </section>
+</body>
+</html>`;
+};
+
+const sendUploadResponse = (req, res, statusCode, payload) => {
+  if (wantsHtmlResponse(req)) {
+    return res.status(statusCode).send(renderUploadHtml(payload));
+  }
+  return res.status(statusCode).json(payload);
+};
+
 export const uploadExcelFile = async (req, res) => {
   // Early return if response already sent
   if (res.headersSent) {
@@ -100,7 +245,7 @@ export const uploadExcelFile = async (req, res) => {
     console.log('req.body:', Object.keys(req.body || {}));
 
     if (!req.file) {
-      return res.status(400).json({
+      return sendUploadResponse(req, res, 400, {
         success: false,
         message: 'Please upload an Excel file. Use field name "file"',
         message_mr: 'कृपया Excel फाइल अपलोड करें। फील्ड नाम "file" का उपयोग करें',
@@ -122,7 +267,7 @@ export const uploadExcelFile = async (req, res) => {
         // Render or local development: read from file path (disk storage)
         console.log(`Reading Excel from file path: ${req.file.path}`);
         if (!fs.existsSync(req.file.path)) {
-          return res.status(400).json({
+          return sendUploadResponse(req, res, 400, {
             success: false,
             message: 'Uploaded file not found',
             message_mr: 'अपलोड की गई फाइल नहीं मिली',
@@ -140,7 +285,7 @@ export const uploadExcelFile = async (req, res) => {
           console.warn('File cleanup error (non-critical):', cleanupError.message);
         }
       }
-      return res.status(400).json({
+      return sendUploadResponse(req, res, 400, {
         success: false,
         message: 'Invalid Excel file format',
         message_mr: 'अमान्य Excel फाइल फॉर्मेट',
@@ -159,7 +304,7 @@ export const uploadExcelFile = async (req, res) => {
           console.warn('File cleanup error (non-critical):', cleanupError.message);
         }
       }
-      return res.status(400).json({
+      return sendUploadResponse(req, res, 400, {
         success: false,
         message: 'Excel file is empty or has no sheets',
         message_mr: 'Excel फाइल खाली है या कोई शीट नहीं है',
@@ -239,7 +384,7 @@ export const uploadExcelFile = async (req, res) => {
           console.warn('File cleanup error (non-critical):', cleanupError.message);
         }
       }
-      return res.status(400).json({
+      return sendUploadResponse(req, res, 400, {
         success: false,
         message: 'Excel file is empty',
         message_mr: 'Excel फाइल खाली है',
@@ -704,7 +849,7 @@ export const uploadExcelFile = async (req, res) => {
           console.warn('File cleanup error (non-critical):', cleanupError.message);
         }
       }
-      return res.status(400).json({
+      return sendUploadResponse(req, res, 400, {
         success: false,
         message: 'No valid data found (with name)',
         message_mr: 'कोई वैध डेटा नहीं मिला (नाम के साथ)',
@@ -827,7 +972,7 @@ export const uploadExcelFile = async (req, res) => {
       return;
     }
 
-    res.status(201).json({
+    return sendUploadResponse(req, res, 201, {
       success: true,
       message: `Data uploaded successfully (${totalInserted} records inserted)`,
       message_mr: `डेटा सफलतापूर्वक अपलोड हो गया (${totalInserted} रिकॉर्ड्स)`,
@@ -861,7 +1006,7 @@ export const uploadExcelFile = async (req, res) => {
     }
 
     // Send error response
-    res.status(500).json({
+    return sendUploadResponse(req, res, 500, {
       success: false,
       message: 'Server error during file upload',
       message_mr: 'फाइल अपलोड के दौरान सर्वर त्रुटि',

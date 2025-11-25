@@ -8,6 +8,7 @@ import multer from 'multer';
 import mongoose from 'mongoose';
 import connectDB from './config/db.js';
 import voterRoutes from './routes/voterRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
 
 // Load environment variables
 dotenv.config();
@@ -92,7 +93,7 @@ app.use(async (req, res, next) => {
     if (!process.env.MONGODB_URI) {
       console.error('❌ MONGODB_URI is not set in environment variables');
       const platform = process.env.VERCEL ? 'Vercel' : process.env.RENDER ? 'Render' : 'your hosting platform';
-      const connectionString = 'mongodb+srv://ashishpimple94_db_user:test12345@cluster0.pwonikt.mongodb.net/voterdata?retryWrites=true&w=majority&appName=Cluster0';
+      const connectionString = 'mongodb+srv://VoterData:Test12345@clustervoter.earmcne.mongodb.net/?appName=Clustervoter';
       
       return res.status(503).json({
         success: false,
@@ -188,8 +189,13 @@ if (process.env.VERCEL !== '1' && !fs.existsSync('uploads')) {
   fs.mkdirSync('uploads', { recursive: true });
 }
 
-// Middleware
-app.use(cors());
+// Middleware - CORS with explicit configuration
+app.use(cors({
+  origin: "*",  // Allow all origins
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept"],
+  credentials: false
+}));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -321,6 +327,7 @@ app.get('/live', (req, res) => {
 });
 
 app.use('/api/voters', voterRoutes);
+app.use('/admin', adminRoutes);
 
 // Multer-specific error handler (e.g., file too large, wrong type)
 app.use((err, req, res, next) => {
